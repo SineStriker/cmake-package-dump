@@ -1,0 +1,7 @@
+[submodule "stdcorelib"]
+	path = src/3rdparty/stdcorelib
+	url = ../../SineStriker/stdcorelib.git
+
+[submodule "syscmdline"]
+	path = src/3rdparty/syscmdline
+	url = ../../SineStriker/syscmdline.git
