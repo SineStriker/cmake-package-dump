@@ -26,12 +26,18 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
     syscmdline::syscmdline
 )
 
-# Add platform specific
+set(RC_DESCRIPTION "${PROJECT_DESCRIPTION}")
+set(RC_COPYRIGHT "Copyright (C) 2025 SineStriker")
+
 if(WIN32)
-    set(RC_DESCRIPTION "CMake Package Dump")
-    set(RC_COPYRIGHT "Copyright (C) 2025 SineStriker")
     include("../3rdparty/stdcorelib/cmake/winrc.cmake")
 endif()
+
+target_compile_definitions(${PROJECT_NAME} PRIVATE
+    TOOL_DESC="${RC_DESCRIPTION}, Version ${PROJECT_VERSION}"
+    TOOL_COPYRIGHT="${RC_COPYRIGHT}, checkout ${PROJECT_HOMEPAGE_URL}"
+    TOOL_VERSION="${PROJECT_VERSION}"
+)
 
 if(CMAKEDUMP_INSTALL)
     install(TARGETS ${PROJECT_NAME}

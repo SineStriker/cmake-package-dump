@@ -1,6 +1,11 @@
 cmake_minimum_required(VERSION 3.16)
 
-project(cmakedump VERSION 0.0.1.1 LANGUAGES CXX)
+project(cmakedump
+    VERSION 0.0.1.1
+    LANGUAGES CXX
+    DESCRIPTION "CMake Package Dump"
+    HOMEPAGE_URL "https://github.com/SineStriker/cmake-package-dump"
+)
 
 # ----------------------------------
 # Build Options
