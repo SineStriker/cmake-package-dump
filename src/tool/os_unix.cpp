@@ -91,6 +91,15 @@ namespace os {
         }
 
         if (pid == 0) { // 子进程
+            // 新增工作目录设置
+            if (!cwd.empty()) {
+                if (chdir(cwd.c_str()) != 0) {
+                    const char *err = "Failed to change working directory\n";
+                    write(STDERR_FILENO, err, strlen(err));
+                    exit(126); // 使用特殊退出码表示目录设置失败
+                }
+            }
+
             // 处理标准输出重定向
             if (stdoutFd != -1) {
                 dup2(stdoutFd, STDOUT_FILENO);

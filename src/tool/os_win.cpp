@@ -8,8 +8,9 @@
 
 namespace os {
 
-    static int ExecuteProcessImpl(const std::vector<std::wstring> &args, std::string *output,
-                                  const std::wstring &stdoutFile = {},
+    static int ExecuteProcessImpl(const std::wstring &command,
+                                  const std::vector<std::wstring> &args, const std::wstring &cwd,
+                                  std::string *output, const std::wstring &stdoutFile = {},
                                   const std::wstring &stderrFile = {}) {
         SECURITY_ATTRIBUTES saAttr = {
             sizeof(SECURITY_ATTRIBUTES),
@@ -94,10 +95,9 @@ namespace os {
         }
 
         // ████████ 拼接命令行 ████████
-        std::wstring cmdLine;
+        std::wstring cmdLine = command;
         for (size_t i = 0; i < args.size(); ++i) {
-            if (i != 0)
-                cmdLine += L' ';
+            cmdLine += L' ';
             if (args[i].find(L' ') != std::wstring::npos) {
                 cmdLine += L'"' + args[i] + L'"';
             } else {
@@ -119,7 +119,7 @@ namespace os {
         PROCESS_INFORMATION pi = {};
         if (!CreateProcessW(NULL, cmdLine.data(), nullptr, nullptr,
                             TRUE, // 继承句柄
-                            dwCreationFlags, nullptr, nullptr, &si, &pi)) {
+                            dwCreationFlags, nullptr, cwd.empty() ? NULL : cwd.c_str(), &si, &pi)) {
             DWORD err = GetLastError();
             if (closeStdOutput)
                 CloseHandle(hStdOutput);
@@ -173,16 +173,19 @@ namespace os {
         return wide_args;
     }
 
-    int ExecuteProcess(const std::vector<std::string> &args, const std::string &strout,
+    int ExecuteProcess(const std::filesystem::path &command, const std::vector<std::string> &args,
+                       const std::filesystem::path &cwd, const std::string &strout,
                        const std::string &strerr) {
-        int ret =
-            ExecuteProcessImpl(ToWideArgs(args), nullptr, stdc::wstring_conv::from_utf8(strout),
-                               stdc::wstring_conv::from_utf8(strerr));
+        int ret = ExecuteProcessImpl(command, ToWideArgs(args), cwd, nullptr,
+                                     stdc::wstring_conv::from_utf8(strout),
+                                     stdc::wstring_conv::from_utf8(strerr));
         return ret;
     }
 
-    int CheckProcessOutput(const std::vector<std::string> &args, std::string &output) {
-        return ExecuteProcessImpl(ToWideArgs(args), &output);
+    int CheckProcessOutput(const std::filesystem::path &command,
+                           const std::vector<std::string> &args, const std::filesystem::path &cwd,
+                           std::string &output) {
+        return ExecuteProcessImpl(command, ToWideArgs(args), cwd, &output);
     }
 
 }

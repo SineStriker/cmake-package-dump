@@ -1,80 +1,40 @@
 #include <iostream>
 #include <sstream>
+#include <fstream>
 #include <regex>
 #include <filesystem>
 
 #include <stdcorelib/system.h>
 #include <stdcorelib/console.h>
 #include <stdcorelib/str.h>
+#include <stdcorelib/path.h>
 
 #include <syscmdline/parser.h>
 #include <syscmdline/parseresult.h>
 
 #include "os.h"
+#include "resources.h"
 
 namespace SCL = SysCmdLine;
 
 namespace fs = std::filesystem;
 
 struct GlobalContext {
+    fs::path cwd;
+
     bool verbose = false;
-    std::string cmakePath = "cmake";
-    std::string ninjaPath = "ninja";
+    fs::path cmakePath = _TSTR("cmake");
+    fs::path ninjaPath = _TSTR("ninja");
+
+    fs::path dir;
+    fs::path output;
+
+    fs::path script;
+
+    std::vector<std::string> extraArgs;
 };
 
 static GlobalContext g_ctx;
-
-static const char *g_CMAKE_VARIABLES_TO_CLEAR[] = {
-    // default libraries
-    "CMAKE_C_STANDARD_LIBRARIES", "CMAKE_CXX_STANDARD_LIBRARIES",
-
-    // implicit directories
-    "CMAKE_C_IMPLICIT_LINK_LIBRARIES", "CMAKE_C_IMPLICIT_LINK_DIRECTORIES",
-    "CMAKE_C_IMPLICIT_LINK_FRAMEWORK_DIRECTORIES", "CMAKE_C_IMPLICIT_INCLUDE_DIRECTORIES",
-    "CMAKE_CXX_IMPLICIT_LINK_LIBRARIES", "CMAKE_CXX_IMPLICIT_LINK_DIRECTORIES",
-    "CMAKE_CXX_IMPLICIT_LINK_FRAMEWORK_DIRECTORIES", "CMAKE_CXX_IMPLICIT_INCLUDE_DIRECTORIES",
-
-    // c flags
-    "CMAKE_C_FLAGS", "CMAKE_C_FLAGS_DEBUG", "CMAKE_C_FLAGS_RELEASE", "CMAKE_C_FLAGS_MINSIZEREL",
-    "CMAKE_C_FLAGS_RELWITHDEBINFO", "CMAKE_C_FLAGS_INIT", "CMAKE_C_FLAGS_DEBUG_INIT",
-    "CMAKE_C_FLAGS_RELEASE_INIT", "CMAKE_C_FLAGS_MINSIZEREL_INIT",
-    "CMAKE_C_FLAGS_RELWITHDEBINFO_INIT", "CMAKE_C_FLAGS",
-
-    // c++ flags
-    "CMAKE_CXX_FLAGS", "CMAKE_CXX_FLAGS_DEBUG", "CMAKE_CXX_FLAGS_RELEASE",
-    "CMAKE_CXX_FLAGS_MINSIZEREL", "CMAKE_CXX_FLAGS_RELWITHDEBINFO", "CMAKE_CXX_FLAGS_INIT",
-    "CMAKE_CXX_FLAGS_DEBUG_INIT", "CMAKE_CXX_FLAGS_RELEASE_INIT", "CMAKE_CXX_FLAGS_MINSIZEREL_INIT",
-    "CMAKE_CXX_FLAGS_RELWITHDEBINFO_INIT",
-
-    // linker flags
-    "CMAKE_EXE_LINKER_FLAGS", "CMAKE_EXE_LINKER_FLAGS_DEBUG", "CMAKE_EXE_LINKER_FLAGS_RELEASE",
-    "CMAKE_EXE_LINKER_FLAGS_MINSIZEREL", "CMAKE_EXE_LINKER_FLAGS_RELWITHDEBINFO",
-    "CMAKE_EXE_LINKER_FLAGS_INIT", "CMAKE_EXE_LINKER_FLAGS_DEBUG_INIT",
-    "CMAKE_EXE_LINKER_FLAGS_RELEASE_INIT", "CMAKE_EXE_LINKER_FLAGS_MINSIZEREL_INIT",
-    "CMAKE_EXE_LINKER_FLAGS_RELWITHDEBINFO_INIT", "CMAKE_SHARED_LINKER_FLAGS",
-    "CMAKE_SHARED_LINKER_FLAGS_DEBUG", "CMAKE_SHARED_LINKER_FLAGS_RELEASE",
-    "CMAKE_SHARED_LINKER_FLAGS_MINSIZEREL", "CMAKE_SHARED_LINKER_FLAGS_RELWITHDEBINFO",
-    "CMAKE_SHARED_LINKER_FLAGS_INIT", "CMAKE_SHARED_LINKER_FLAGS_DEBUG_INIT",
-    "CMAKE_SHARED_LINKER_FLAGS_RELEASE_INIT", "CMAKE_SHARED_LINKER_FLAGS_MINSIZEREL_INIT",
-    "CMAKE_SHARED_LINKER_FLAGS_RELWITHDEBINFO_INIT", "CMAKE_STATIC_LINKER_FLAGS",
-    "CMAKE_STATIC_LINKER_FLAGS_DEBUG", "CMAKE_STATIC_LINKER_FLAGS_RELEASE",
-    "CMAKE_STATIC_LINKER_FLAGS_MINSIZEREL", "CMAKE_STATIC_LINKER_FLAGS_RELWITHDEBINFO",
-    "CMAKE_STATIC_LINKER_FLAGS_INIT", "CMAKE_STATIC_LINKER_FLAGS_DEBUG_INIT",
-    "CMAKE_STATIC_LINKER_FLAGS_RELEASE_INIT", "CMAKE_STATIC_LINKER_FLAGS_MINSIZEREL_INIT",
-    "CMAKE_STATIC_LINKER_FLAGS_RELWITHDEBINFO_INIT", "CMAKE_MODULE_LINKER_FLAGS",
-    "CMAKE_MODULE_LINKER_FLAGS_DEBUG", "CMAKE_MODULE_LINKER_FLAGS_RELEASE",
-    "CMAKE_MODULE_LINKER_FLAGS_MINSIZEREL", "CMAKE_MODULE_LINKER_FLAGS_RELWITHDEBINFO",
-    "CMAKE_MODULE_LINKER_FLAGS_INIT", "CMAKE_MODULE_LINKER_FLAGS_DEBUG_INIT",
-    "CMAKE_MODULE_LINKER_FLAGS_RELEASE_INIT", "CMAKE_MODULE_LINKER_FLAGS_MINSIZEREL_INIT",
-    "CMAKE_MODULE_LINKER_FLAGS_RELWITHDEBINFO_INIT",
-
-    // msvc
-    "CMAKE_MSVC_RUNTIME_LIBRARY",
-
-    // windows
-    // https://github.com/Kitware/CMake/blob/e66e0b2cfefaf61fa995a0aa117df31e680b1c7e/Source/cmLocalGenerator.cxx#L1604
-    // https://github.com/Kitware/CMake/blob/e66e0b2cfefaf61fa995a0aa117df31e680b1c7e/Modules/Platform/Windows-MSVC.cmake#L404
-    "CMAKE_CXX_CREATE_WIN32_EXE", "CMAKE_CXX_CREATE_CONSOLE_EXE"};
 
 static inline std::string exception_message(const std::exception &e) {
     std::string msg = e.what();
@@ -87,13 +47,29 @@ static inline std::string exception_message(const std::exception &e) {
     return msg;
 }
 
-static void check_cmake(const std::filesystem::path &programPath) {
+static inline void report_subprocess_args(const fs::path &command,
+                                          const std::vector<std::string> &args) {
+    std::string cmdLine = stdc::system::join_command_line({stdc::to_string(command)});
+    if (!args.empty()) {
+        cmdLine += " " + stdc::system::join_command_line(args);
+    }
+    stdc::console::println(stdc::console::nostyle, stdc::console::blue | stdc::console::intensified,
+                           stdc::console::nocolor, cmdLine);
+}
+
+static void check_cmake() {
     int ret;
     std::string output;
 
     // execute: cmake --version
     try {
-        ret = os::CheckProcessOutput({stdc::to_string(programPath), "--version"}, output);
+        std::vector<std::string> cmakeArgs = {
+            "--version",
+        };
+        if (g_ctx.verbose) {
+            report_subprocess_args(g_ctx.cmakePath, cmakeArgs);
+        }
+        ret = os::CheckProcessOutput(g_ctx.cmakePath, cmakeArgs, {}, output);
     } catch (const std::exception &e) {
         throw std::runtime_error(stdc::formatN("check cmake failed: %1", exception_message(e)));
     }
@@ -114,7 +90,7 @@ static void check_cmake(const std::filesystem::path &programPath) {
         std::smatch match;
         if (std::regex_search(line, match, pattern)) {
             if (g_ctx.verbose) {
-                std::cout << "cmake version: " << match[1] << std::endl;
+                stdc::u8print("cmake version: %1\n", match[1].str());
             }
             return;
         }
@@ -122,13 +98,19 @@ static void check_cmake(const std::filesystem::path &programPath) {
     throw std::runtime_error("check cmake failed: failed to get version");
 }
 
-static void check_ninja(const std::filesystem::path &programPath) {
+static void check_ninja() {
     int ret;
     std::string output;
 
     // execute: ninja --version
     try {
-        ret = os::CheckProcessOutput({stdc::to_string(programPath), "--version"}, output);
+        std::vector<std::string> ninjaArgs = {
+            "--version",
+        };
+        if (g_ctx.verbose) {
+            report_subprocess_args(g_ctx.ninjaPath, ninjaArgs);
+        }
+        ret = os::CheckProcessOutput(g_ctx.ninjaPath, ninjaArgs, {}, output);
     } catch (const std::exception &e) {
         throw std::runtime_error(stdc::formatN("check ninja failed: %1", exception_message(e)));
     }
@@ -144,11 +126,39 @@ static void check_ninja(const std::filesystem::path &programPath) {
     std::string line;
     if (std::getline(std::stringstream(output), line)) {
         if (g_ctx.verbose) {
-            std::cout << "ninja version: " << line << std::endl;
+            stdc::u8print("ninja version: %1\n", line);
         }
         return;
     }
     throw std::runtime_error("check ninja failed: failed to get version");
+}
+
+static void run_cmake_configure() {
+    int ret;
+    try {
+        std::vector<std::string> cmakeArgs = {
+            "-S",
+            ".",
+            "-B",
+            "build",
+            "-G",
+            "Ninja",
+            "-DCMAKE_MAKE_PROGRAM:FILEPATH=" + stdc::to_string(g_ctx.ninjaPath),
+            "-DXMAKE_FIND_SCRIPT:FILEPATH=" + stdc::to_string(g_ctx.script),
+        };
+        cmakeArgs.insert(cmakeArgs.end(), g_ctx.extraArgs.begin(), g_ctx.extraArgs.end());
+        if (g_ctx.verbose) {
+            report_subprocess_args(g_ctx.cmakePath, cmakeArgs);
+        }
+        ret = os::ExecuteProcess(g_ctx.cmakePath, cmakeArgs, g_ctx.dir, g_ctx.verbose ? "-" : "",
+                                 g_ctx.verbose ? "-" : "");
+    } catch (const std::exception &e) {
+        throw std::runtime_error(stdc::formatN("execute cmake failed: %1", exception_message(e)));
+    }
+    if (ret != 0) {
+        throw std::runtime_error(
+            stdc::formatN("execute cmake failed: process exits with code %1", ret));
+    }
 }
 
 static int cmd_handler(const SCL::ParseResult &result) {
@@ -156,33 +166,81 @@ static int cmd_handler(const SCL::ParseResult &result) {
         g_ctx.verbose = true;
     }
 
-    auto cmakePath = result.valueForOption("--cmake").toString();
-    if (!cmakePath.empty()) {
-        g_ctx.cmakePath = cmakePath;
+    {
+        auto cmakePath = result.valueForOption("--cmake").toString();
+        auto ninjaPath = result.valueForOption("--ninja").toString();
+
+        auto extraArgs = result.option("--").values();
+        auto output = result.valueForOption("-o").toString();
+        auto dir = result.valueForOption("--dir").toString();
+        auto script = result.value("script").toString();
+
+        if (!cmakePath.empty()) {
+            g_ctx.cmakePath = stdc::path::from_utf8(cmakePath);
+        }
+        if (!ninjaPath.empty()) {
+            g_ctx.ninjaPath = stdc::path::from_utf8(ninjaPath);
+        }
+        g_ctx.dir =
+            dir.empty() ? g_ctx.cwd / _TSTR("build") : fs::absolute(stdc::path::from_utf8(dir));
+        if (!output.empty()) {
+            g_ctx.output = stdc::path::from_utf8(output);
+        }
+
+        g_ctx.script = fs::absolute(stdc::path::from_utf8(script));
+
+        if (!extraArgs.empty()) {
+            g_ctx.extraArgs.reserve(extraArgs.size());
+            for (const auto &arg : extraArgs) {
+                g_ctx.extraArgs.push_back(arg.toString());
+            }
+        }
     }
 
-    auto ninjaPath = result.valueForOption("--ninja").toString();
-    if (!ninjaPath.empty()) {
-        g_ctx.ninjaPath = ninjaPath;
-    }
-
-    auto extraArgs = result.option("--").values();
-    auto output = result.valueForOption("-o").toString();
-    auto dir = result.valueForOption("--dir").toString();
-    auto script = result.value("script").toString();
+    // initialize
+    g_ctx.cwd = fs::current_path();
 
     // check tools
-    check_cmake(g_ctx.cmakePath);
-    check_ninja(g_ctx.ninjaPath);
+    check_cmake();
+    check_ninja();
 
-    // create temporary directory
-    // if (!fs::is_directory(dir)) {
-    //     fs::create_directory(dir);
-    // }
+    // prepare temporary path
+    if (fs::exists(g_ctx.dir)) {
+        fs::remove_all(g_ctx.dir);
+    }
+    fs::create_directory(g_ctx.dir);
+
+    // check script file
+    if (!fs::exists(g_ctx.script)) {
+        throw std::runtime_error(stdc::formatN("failed to read file: %1", g_ctx.script));
+    }
 
     // create CMakeLists.txt
+    fs::path cmakeListsPath = g_ctx.dir / _TSTR("CMakeLists.txt");
+    {
+        std::ofstream cmakeListsFile(cmakeListsPath,
+                                     std::ios::out | std::ios::trunc | std::ios::binary);
+        if (!cmakeListsFile.is_open()) {
+            throw std::runtime_error(stdc::formatN("failed to open file: %1", cmakeListsPath));
+        }
+        cmakeListsFile.write((const char *) CMakeLists_txt_data.data, CMakeLists_txt_data.size);
+    }
 
+    // create TestTargets.cmake
+    fs::path testTargetsCMakePath = g_ctx.dir / _TSTR("TestTargets.cmake");
+    {
+        std::ofstream testTargetsCMakeFile(testTargetsCMakePath,
+                                           std::ios::out | std::ios::trunc | std::ios::binary);
+        if (!testTargetsCMakeFile.is_open()) {
+            throw std::runtime_error(
+                stdc::formatN("failed to open file: %1", testTargetsCMakePath));
+        }
+        testTargetsCMakeFile.write((const char *) TestTargets_cmake_data.data,
+                                   TestTargets_cmake_data.size);
+    }
 
+    // execute CMake
+    run_cmake_configure();
 
     return 0;
 }

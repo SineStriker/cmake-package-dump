@@ -1,0 +1,159 @@
+cmake_minimum_required(VERSION 3.15)
+
+project(xmake)
+
+set(_CMAKE_VARIABLES_TO_CLEAR
+
+    # default libraries
+    "CMAKE_C_STANDARD_LIBRARIES"
+    "CMAKE_CXX_STANDARD_LIBRARIES"
+
+    # implicit directories
+    "CMAKE_C_IMPLICIT_LINK_LIBRARIES"
+    "CMAKE_C_IMPLICIT_LINK_DIRECTORIES"
+    "CMAKE_C_IMPLICIT_LINK_FRAMEWORK_DIRECTORIES"
+    "CMAKE_C_IMPLICIT_INCLUDE_DIRECTORIES"
+    "CMAKE_CXX_IMPLICIT_LINK_LIBRARIES"
+    "CMAKE_CXX_IMPLICIT_LINK_DIRECTORIES"
+    "CMAKE_CXX_IMPLICIT_LINK_FRAMEWORK_DIRECTORIES"
+    "CMAKE_CXX_IMPLICIT_INCLUDE_DIRECTORIES"
+
+    # c flags
+    "CMAKE_C_FLAGS"
+    "CMAKE_C_FLAGS_DEBUG"
+    "CMAKE_C_FLAGS_RELEASE"
+    "CMAKE_C_FLAGS_MINSIZEREL"
+    "CMAKE_C_FLAGS_RELWITHDEBINFO"
+    "CMAKE_C_FLAGS_INIT"
+    "CMAKE_C_FLAGS_DEBUG_INIT"
+    "CMAKE_C_FLAGS_RELEASE_INIT"
+    "CMAKE_C_FLAGS_MINSIZEREL_INIT"
+    "CMAKE_C_FLAGS_RELWITHDEBINFO_INIT"
+    "CMAKE_C_FLAGS"
+
+    # c++ flags
+    "CMAKE_CXX_FLAGS"
+    "CMAKE_CXX_FLAGS_DEBUG"
+    "CMAKE_CXX_FLAGS_RELEASE"
+    "CMAKE_CXX_FLAGS_MINSIZEREL"
+    "CMAKE_CXX_FLAGS_RELWITHDEBINFO"
+    "CMAKE_CXX_FLAGS_INIT"
+    "CMAKE_CXX_FLAGS_DEBUG_INIT"
+    "CMAKE_CXX_FLAGS_RELEASE_INIT"
+    "CMAKE_CXX_FLAGS_MINSIZEREL_INIT"
+    "CMAKE_CXX_FLAGS_RELWITHDEBINFO_INIT"
+
+    # linker flags
+    "CMAKE_EXE_LINKER_FLAGS"
+    "CMAKE_EXE_LINKER_FLAGS_DEBUG"
+    "CMAKE_EXE_LINKER_FLAGS_RELEASE"
+    "CMAKE_EXE_LINKER_FLAGS_MINSIZEREL"
+    "CMAKE_EXE_LINKER_FLAGS_RELWITHDEBINFO"
+    "CMAKE_EXE_LINKER_FLAGS_INIT"
+    "CMAKE_EXE_LINKER_FLAGS_DEBUG_INIT"
+    "CMAKE_EXE_LINKER_FLAGS_RELEASE_INIT"
+    "CMAKE_EXE_LINKER_FLAGS_MINSIZEREL_INIT"
+    "CMAKE_EXE_LINKER_FLAGS_RELWITHDEBINFO_INIT"
+    "CMAKE_SHARED_LINKER_FLAGS"
+    "CMAKE_SHARED_LINKER_FLAGS_DEBUG"
+    "CMAKE_SHARED_LINKER_FLAGS_RELEASE"
+    "CMAKE_SHARED_LINKER_FLAGS_MINSIZEREL"
+    "CMAKE_SHARED_LINKER_FLAGS_RELWITHDEBINFO"
+    "CMAKE_SHARED_LINKER_FLAGS_INIT"
+    "CMAKE_SHARED_LINKER_FLAGS_DEBUG_INIT"
+    "CMAKE_SHARED_LINKER_FLAGS_RELEASE_INIT"
+    "CMAKE_SHARED_LINKER_FLAGS_MINSIZEREL_INIT"
+    "CMAKE_SHARED_LINKER_FLAGS_RELWITHDEBINFO_INIT"
+    "CMAKE_STATIC_LINKER_FLAGS"
+    "CMAKE_STATIC_LINKER_FLAGS_DEBUG"
+    "CMAKE_STATIC_LINKER_FLAGS_RELEASE"
+    "CMAKE_STATIC_LINKER_FLAGS_MINSIZEREL"
+    "CMAKE_STATIC_LINKER_FLAGS_RELWITHDEBINFO"
+    "CMAKE_STATIC_LINKER_FLAGS_INIT"
+    "CMAKE_STATIC_LINKER_FLAGS_DEBUG_INIT"
+    "CMAKE_STATIC_LINKER_FLAGS_RELEASE_INIT"
+    "CMAKE_STATIC_LINKER_FLAGS_MINSIZEREL_INIT"
+    "CMAKE_STATIC_LINKER_FLAGS_RELWITHDEBINFO_INIT"
+    "CMAKE_MODULE_LINKER_FLAGS"
+    "CMAKE_MODULE_LINKER_FLAGS_DEBUG"
+    "CMAKE_MODULE_LINKER_FLAGS_RELEASE"
+    "CMAKE_MODULE_LINKER_FLAGS_MINSIZEREL"
+    "CMAKE_MODULE_LINKER_FLAGS_RELWITHDEBINFO"
+    "CMAKE_MODULE_LINKER_FLAGS_INIT"
+    "CMAKE_MODULE_LINKER_FLAGS_DEBUG_INIT"
+    "CMAKE_MODULE_LINKER_FLAGS_RELEASE_INIT"
+    "CMAKE_MODULE_LINKER_FLAGS_MINSIZEREL_INIT"
+    "CMAKE_MODULE_LINKER_FLAGS_RELWITHDEBINFO_INIT"
+
+    # msvc
+    "CMAKE_MSVC_RUNTIME_LIBRARY"
+
+    # windows
+    # https://github.com/Kitware/CMake/blob/e66e0b2cfefaf61fa995a0aa117df31e680b1c7e/Source/cmLocalGenerator.cxx#L1604
+    # https://github.com/Kitware/CMake/blob/e66e0b2cfefaf61fa995a0aa117df31e680b1c7e/Modules/Platform/Windows-MSVC.cmake#L404
+    "CMAKE_CXX_CREATE_WIN32_EXE"
+    "CMAKE_CXX_CREATE_CONSOLE_EXE"
+)
+
+# Prevent CMake from adding extra flags
+foreach(_var IN LISTS _CMAKE_VARIABLES_TO_CLEAR)
+    set(${_var} "")
+endforeach()
+
+# Check required options
+if(NOT CMAKE_BUILD_TYPE)
+    message(FATAL_ERROR "CMAKE_BUILD_TYPE is not defined")
+endif()
+
+if(NOT XMAKE_FIND_SCRIPT)
+    message(FATAL_ERROR "XMAKE_FIND_SCRIPT is not defined")
+endif()
+
+if(NOT XMAKE_DUMP_TARGETS)
+    set(XMAKE_DUMP_TARGETS)
+endif()
+
+string(TOUPPER ${CMAKE_BUILD_TYPE} XMAKE_CONFIG_UPPER)
+
+# Get targets
+set(XMAKE_TEST_DIR ${CMAKE_CURRENT_BINARY_DIR}/src/test_scope)
+file(MAKE_DIRECTORY ${XMAKE_TEST_DIR})
+file(COPY_FILE ${CMAKE_CURRENT_LIST_DIR}/TestTargets.cmake ${XMAKE_TEST_DIR}/CMakeLists.txt)
+set(XMAKE_FIND_TARGETS)
+add_subdirectory(${XMAKE_TEST_DIR} objs/test_scope)
+
+# Extract targets
+foreach(_target IN LISTS XMAKE_FIND_TARGETS)
+    message(STATUS "Extracting target: ${_target}")
+
+    string(REPLACE "::" "__" _new_name ${_target})
+    set(_target_only_dir ${CMAKE_CURRENT_BINARY_DIR}/src/${_new_name}_ONLY)
+    file(MAKE_DIRECTORY ${_target_only_dir})
+    file(WRITE ${_target_only_dir}/CMakeLists.txt "
+        include(\${XMAKE_FIND_SCRIPT})
+        set_target_properties(${_target} PROPERTIES INTERFACE_LINK_LIBRARIES \"\")
+        set(XMAKE_PROJECT_NAME ${_new_name}_ONLY)
+        add_executable(\${XMAKE_PROJECT_NAME} ${_new_name}_ONLY.cpp)
+        target_link_libraries(\${XMAKE_PROJECT_NAME} PRIVATE ${_target})
+    ")
+    file(WRITE ${_target_only_dir}/${_new_name}_ONLY.cpp "#include <iostream>\n")
+
+    set(_target_full_dir ${CMAKE_CURRENT_BINARY_DIR}/src/${_new_name}_FULL)
+    file(MAKE_DIRECTORY ${_target_full_dir})
+    file(WRITE ${_target_full_dir}/CMakeLists.txt "
+        include(\${XMAKE_FIND_SCRIPT})
+        get_property(_targets DIRECTORY \${CMAKE_CURRENT_LIST_DIR} PROPERTY IMPORTED_TARGETS)
+        foreach(_target IN LISTS _targets)
+            if(NOT \"\${_target}\" STREQUAL \"${_target}\")
+                set_target_properties(\${_target} PROPERTIES INTERFACE_LINK_LIBRARIES \"\")
+            endif()
+        endforeach()
+        set(XMAKE_PROJECT_NAME ${_new_name}_FULL)
+        add_executable(\${XMAKE_PROJECT_NAME} ${_new_name}_FULL.cpp)
+        target_link_libraries(\${XMAKE_PROJECT_NAME} PRIVATE ${_target})
+    ")
+    file(WRITE ${_target_full_dir}/${_new_name}_FULL.cpp "#include <iostream>\n")
+
+    add_subdirectory(${_target_only_dir} objs/${_new_name}_ONLY)
+    add_subdirectory(${_target_full_dir} objs/${_new_name}_FULL)
+endforeach()
