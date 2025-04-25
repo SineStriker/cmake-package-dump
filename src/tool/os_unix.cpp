@@ -8,6 +8,9 @@
 
 namespace os {
 
+    /*!
+        \internal
+    */
     static int ExecuteProcessImpl(const std::vector<std::string> &args, std::string *output,
                                   const std::string &stdoutFile = {},
                                   const std::string &stderrFile = {}) {
