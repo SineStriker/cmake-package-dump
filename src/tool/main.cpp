@@ -4,6 +4,7 @@
 #include <regex>
 #include <filesystem>
 #include <stdexcept>
+#include <algorithm>
 
 #include <stdcorelib/system.h>
 #include <stdcorelib/console.h>
@@ -43,6 +44,53 @@ namespace tool {
     using stdc::console::critical;
 
     using stdc::experimental::Process;
+
+    namespace ninja {
+
+        // don't use std::regex, which results in glibc stack overflow
+
+        // ^build\s+([^:]+):.+$
+        static inline bool is_build_statement(std::string_view line, std::string_view &build_part) {
+            if (!stdc::starts_with(line, "build")) {
+                return false;
+            }
+            line = line.substr(5);
+            if (line.empty() || !::isspace(line.front())) {
+                return false;
+            }
+            line = line.substr(1);
+            auto colon_idx = line.find(':');
+            if (colon_idx == std::string_view::npos) {
+                return false;
+            }
+            build_part = stdc::trim(line.substr(0, colon_idx));
+            return true;
+        }
+
+        // ^\s+([\w_]+)\s*=\s*(.+)$
+        static inline bool is_build_assignment(std::string_view line, std::string_view &key,
+                                               std::string_view &value) {
+            if (line.empty() || !::isspace(line.front())) {
+                return false;
+            }
+            auto eq_idx = line.find('=');
+            if (eq_idx == std::string_view::npos) {
+                return false;
+            }
+
+            std::string_view maybe_key = stdc::trim(line.substr(0, eq_idx));
+            std::string_view maybe_value = stdc::trim(line.substr(eq_idx + 1));
+            if (maybe_key.empty() || !std::all_of(maybe_key.begin(), maybe_key.end(), [](char ch) {
+                    return ::isalnum(ch) || ch == '_';
+                })) {
+                return false;
+            }
+            key = maybe_key;
+            value = maybe_value;
+            return true;
+        }
+
+    }
 
 }
 
@@ -101,7 +149,7 @@ static void check_cmake() {
         std::smatch match;
         if (std::regex_search(line, match, pattern)) {
             if (g_ctx.verbose) {
-                stdc::u8print("cmake version: %1\n", match[1].str());
+                stdc::u8println("cmake version: %1", match[1].str());
             }
             return;
         }
@@ -137,7 +185,7 @@ static void check_ninja() {
     std::string line;
     if (std::getline(std::stringstream(output), line)) {
         if (g_ctx.verbose) {
-            stdc::u8print("ninja version: %1\n", line);
+            stdc::u8println("ninja version: %1", line);
         }
         return;
     }
@@ -314,6 +362,9 @@ static int cmd_handler(const SCL::ParseResult &result) {
         std::map<std::string, std::string> current_vars;
 
         while (std::getline(ninjaFile, line)) {
+            // NOTICE:
+            //
+
             std::string_view line_view = line;
 
             // https://ninja-build.org/manual.html#_build_statements
@@ -321,9 +372,8 @@ static int cmd_handler(const SCL::ParseResult &result) {
             // e.g.
             //      build CMakeFiles/main.dir/main.cpp.obj: ...
             //      build main.exe: ...
-            static const std::regex build_re(R"(^build\s+([^:]+):.+$)");
-            std::smatch match;
-            if (std::regex_search(line, match, build_re)) {
+            if (std::string_view build_part;
+                tool::ninja::is_build_statement(line_view, build_part)) {
                 if (!current_build.empty()) {
                     if (!current_vars.empty()) {
                         ninja_builds.push_back({current_build, current_vars});
@@ -331,8 +381,6 @@ static int cmd_handler(const SCL::ParseResult &result) {
                     }
                     current_build.clear();
                 }
-
-                auto build_part = match[1].str();
                 auto build_target = stdc::system::split_command_line(build_part)[0];
                 auto stem = fs::path(stdc::path::from_utf8((build_target))).stem();
                 if (stdc::starts_with(stem.native(), _TSTR("_AUX_LIB_"))) {
@@ -341,9 +389,11 @@ static int cmd_handler(const SCL::ParseResult &result) {
                 continue;
             }
             if (!current_build.empty()) {
-                static const std::regex var_re(R"(^\s+([\w_]+)\s*=\s*(.+)$)");
-                if (std::regex_search(line, match, var_re) && match.size() >= 2) {
-                    current_vars[match[1].str()] = match[2].str();
+                // e.g.
+                // ^  KEY_KEY = VALUE VALUE
+                if (std::string_view key, value;
+                    tool::ninja::is_build_assignment(line_view, key, value)) {
+                    current_vars[std::string(key)] = value;
                 } else {
                     if (!current_vars.empty()) {
                         ninja_builds.push_back({current_build, current_vars});
