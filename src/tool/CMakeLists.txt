@@ -1,15 +1,6 @@
 set(_src
-    os.h
-    os.cpp
     main.cpp
 )
-
-if(WIN32)
-    list(APPEND _src os_win.cpp)
-else()
-    list(APPEND _src os_unix.cpp)
-endif()
-
 # Add target
 add_executable(${PROJECT_NAME} ${_src})
 

@@ -1,5 +1,6 @@
 # stdcorelib
 set(STDCORELIB_INSTALL OFF)
+set(STDCORELIB_BUILD_STATIC OFF)
 add_subdirectory(stdcorelib)
 
 # syscmdline

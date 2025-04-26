@@ -3,16 +3,17 @@
 #include <fstream>
 #include <regex>
 #include <filesystem>
+#include <stdexcept>
 
 #include <stdcorelib/system.h>
 #include <stdcorelib/console.h>
 #include <stdcorelib/str.h>
 #include <stdcorelib/path.h>
+#include <stdcorelib/experimental/process.h>
 
 #include <syscmdline/parser.h>
 #include <syscmdline/parseresult.h>
 
-#include "os.h"
 #include "resources.h"
 
 namespace SCL = SysCmdLine;
@@ -34,6 +35,17 @@ struct GlobalContext {
     std::vector<std::string> extraArgs;
 };
 
+namespace tool {
+
+    using stdc::console::debug;
+    using stdc::console::success;
+    using stdc::console::warning;
+    using stdc::console::critical;
+
+    using stdc::experimental::Process;
+
+}
+
 static GlobalContext g_ctx;
 
 static inline std::string exception_message(const std::exception &e) {
@@ -53,8 +65,7 @@ static inline void report_subprocess_args(const fs::path &command,
     if (!args.empty()) {
         cmdLine += " " + stdc::system::join_command_line(args);
     }
-    stdc::console::println(stdc::console::nostyle, stdc::console::blue | stdc::console::intensified,
-                           stdc::console::nocolor, cmdLine);
+    tool::debug(cmdLine);
 }
 
 static void check_cmake() {
@@ -69,7 +80,7 @@ static void check_cmake() {
         if (g_ctx.verbose) {
             report_subprocess_args(g_ctx.cmakePath, cmakeArgs);
         }
-        ret = os::CheckProcessOutput(g_ctx.cmakePath, cmakeArgs, {}, output);
+        ret = tool::Process::checkOptput(g_ctx.cmakePath, cmakeArgs, {}, output);
     } catch (const std::exception &e) {
         throw std::runtime_error(stdc::formatN("check cmake failed: %1", exception_message(e)));
     }
@@ -110,7 +121,7 @@ static void check_ninja() {
         if (g_ctx.verbose) {
             report_subprocess_args(g_ctx.ninjaPath, ninjaArgs);
         }
-        ret = os::CheckProcessOutput(g_ctx.ninjaPath, ninjaArgs, {}, output);
+        ret = tool::Process::checkOptput(g_ctx.ninjaPath, ninjaArgs, {}, output);
     } catch (const std::exception &e) {
         throw std::runtime_error(stdc::formatN("check ninja failed: %1", exception_message(e)));
     }
@@ -150,14 +161,18 @@ static void run_cmake_configure() {
         if (g_ctx.verbose) {
             report_subprocess_args(g_ctx.cmakePath, cmakeArgs);
         }
-        ret = os::ExecuteProcess(g_ctx.cmakePath, cmakeArgs, g_ctx.dir, g_ctx.verbose ? "-" : "",
-                                 g_ctx.verbose ? "-" : "");
+        ret = tool::Process::start(g_ctx.cmakePath, cmakeArgs, g_ctx.dir, g_ctx.verbose ? "-" : "",
+                                   g_ctx.verbose ? "-" : "");
     } catch (const std::exception &e) {
         throw std::runtime_error(stdc::formatN("execute cmake failed: %1", exception_message(e)));
     }
     if (ret != 0) {
         throw std::runtime_error(
             stdc::formatN("execute cmake failed: process exits with code %1", ret));
+    }
+
+    if (g_ctx.verbose) {
+        tool::success("Run cmake configuration OK!");
     }
 }
 
@@ -242,6 +257,285 @@ static int cmd_handler(const SCL::ParseResult &result) {
     // execute CMake
     run_cmake_configure();
 
+    // analyze CMakeCache.txt
+    fs::path build_dir = g_ctx.dir / _TSTR("build");
+    bool is_msvc = false;
+    {
+        std::ifstream cache(build_dir / _TSTR("CMakeCache.txt"));
+        std::string line;
+        while (std::getline(cache, line)) {
+            std::string_view line_view = line;
+            if (stdc::starts_with(line_view, "CMAKE_CXX_COMPILER")) {
+                auto eq_pos = line_view.find('=');
+                if (eq_pos != std::string::npos) {
+                    auto compiler = stdc::trim(line_view.substr(eq_pos + 1));
+                    auto basename = fs::path(stdc::path::from_utf8(compiler)).stem();
+                    if (stdc::to_lower(basename) == _TSTR("cl"))
+                        is_msvc = true;
+                }
+                break;
+            }
+        }
+    }
+
+    struct NinjaTarget {
+        // msvc: /D -D
+        // gcc:  -D
+        std::vector<std::string> defines;
+        // gcc: -l
+        std::vector<std::string> links;
+        // msvc: -LIBPATH: /LIBPATH
+        // gcc:  -L
+        std::vector<std::string> linkdirs;
+        // msvc: -I /I -external:I /external:I
+        // gcc:  -I -isystem -idirafter
+        std::vector<std::string> includes;
+        std::vector<std::string> flags;
+        std::vector<std::string> linkflags;
+    };
+    std::map<std::string, NinjaTarget> targets;
+
+    // analyze build.ninja
+    fs::path ninjaFilePath = g_ctx.dir / _TSTR("build") / _TSTR("build.ninja");
+    {
+        std::ifstream ninjaFile(ninjaFilePath);
+        if (!ninjaFile.is_open()) {
+            throw std::runtime_error(stdc::formatN("failed to open file: %1", ninjaFilePath));
+        }
+
+        struct NinjaBuild {
+            std::string build_target;
+            std::map<std::string, std::string> variables;
+        };
+        std::vector<NinjaBuild> ninja_builds;
+
+        std::string line;
+        std::string current_build;
+        std::map<std::string, std::string> current_vars;
+
+        while (std::getline(ninjaFile, line)) {
+            std::string_view line_view = line;
+
+            // https://ninja-build.org/manual.html#_build_statements
+            // match build statement
+            // e.g.
+            //      build CMakeFiles/main.dir/main.cpp.obj: ...
+            //      build main.exe: ...
+            static const std::regex build_re(R"(^build\s+([^:]+):.+$)");
+            std::smatch match;
+            if (std::regex_search(line, match, build_re)) {
+                if (!current_build.empty()) {
+                    if (!current_vars.empty()) {
+                        ninja_builds.push_back({current_build, current_vars});
+                        current_vars.clear();
+                    }
+                    current_build.clear();
+                }
+
+                auto build_part = match[1].str();
+                auto build_target = stdc::system::split_command_line(build_part)[0];
+                auto stem = fs::path(stdc::path::from_utf8((build_target))).stem();
+                if (stdc::starts_with(stem.native(), _TSTR("_AUX_LIB_"))) {
+                    current_build = build_target;
+                }
+                continue;
+            }
+            if (!current_build.empty()) {
+                static const std::regex var_re(R"(^\s+([\w_]+)\s*=\s*(.+)$)");
+                if (std::regex_search(line, match, var_re) && match.size() >= 2) {
+                    current_vars[match[1].str()] = match[2].str();
+                } else {
+                    if (!current_vars.empty()) {
+                        ninja_builds.push_back({current_build, current_vars});
+                        current_vars.clear();
+                    }
+                    current_build.clear();
+                }
+            }
+        }
+        if (!current_build.empty() && !current_vars.empty()) {
+            ninja_builds.push_back({current_build, current_vars});
+        }
+
+        if (g_ctx.verbose) {
+            tool::debug("Parse build.ninja:");
+            for (const auto &build : ninja_builds) {
+                stdc::u8println("build %1:", build.build_target);
+                for (const auto &var : build.variables) {
+                    stdc::u8println("  %1 = %2", var.first, var.second);
+                }
+                stdc::u8println();
+            }
+        }
+
+        // combine arguments
+        for (const auto &build : ninja_builds) {
+            auto name = fs::path(stdc::path::from_utf8((build.build_target))).stem().string();
+            auto dot_idx = name.find('.');
+            if (dot_idx != std::string::npos) {
+                name = name.substr(0, dot_idx);
+            }
+
+            auto &target = targets[name];
+            for (const auto &var : build.variables) {
+                auto &key = var.first;
+                auto &value = var.second;
+                if (key == "DEFINES") {
+                    auto items = stdc::system::split_command_line(value);
+                    for (const auto &item : items) {
+                        if (is_msvc) {
+                            if (stdc::starts_with(item, "-D") || stdc::starts_with(item, "/D")) {
+                                target.defines.push_back(item.substr(2));
+                            }
+                        } else {
+                            if (stdc::starts_with(item, "-D")) {
+                                target.defines.push_back(item.substr(2));
+                            }
+                        }
+                    }
+                    continue;
+                }
+
+                if (key == "LINK_LIBRARIES") {
+                    auto items = stdc::system::split_command_line(value);
+                    for (const auto &item : items) {
+                        if (is_msvc) {
+                            target.links.push_back(item);
+                        } else {
+                            if (stdc::starts_with(item, "-l")) {
+                                target.links.push_back(item.substr(2));
+                            } else {
+                                target.links.push_back(item);
+                            }
+                        }
+                    }
+                    continue;
+                }
+
+                if (key == "LINK_PATH") {
+                    auto items = stdc::system::split_command_line(value);
+                    for (const auto &item : items) {
+                        if (is_msvc) {
+                            auto item_lower = stdc::to_upper(item);
+                            if (stdc::starts_with(item_lower, "-LIBPATH:") ||
+                                stdc::starts_with(item_lower, "/LIBPATH:")) {
+                                target.linkdirs.push_back(item.substr(9));
+                            } else {
+                                target.linkdirs.push_back(item);
+                            }
+                        } else {
+                            if (stdc::starts_with(item, "-L")) {
+                                target.linkdirs.push_back(item.substr(2));
+                            } else {
+                                target.linkdirs.push_back(item);
+                            }
+                        }
+                    }
+                    continue;
+                }
+
+                if (key == "INCLUDES") {
+                    auto items = stdc::system::split_command_line(value);
+                    bool has_include = false;
+                    for (const auto &item : items) {
+                        if (has_include) {
+                            target.includes.push_back(item);
+                            has_include = false;
+                        } else if (is_msvc) {
+                            if (item == "-I" || item == "/I" || item == "-external:I" ||
+                                item == "/external:I") {
+                                has_include = true;
+                            } else if (stdc::starts_with(item, "-I") ||
+                                       stdc::starts_with(item, "/I")) {
+                                target.includes.push_back(item.substr(2));
+                            } else if (stdc::starts_with(item, "-external:I") ||
+                                       stdc::starts_with(item, "/external:I")) {
+                                target.includes.push_back(item.substr(11));
+                            }
+                        } else {
+                            if (item == "-isystem" || item == "-idirafter" || item == "-I") {
+                                has_include = true;
+                            } else if (stdc::starts_with(item, "-I")) {
+                                target.includes.push_back(item.substr(2));
+                            }
+                        }
+                    }
+                    continue;
+                }
+
+                if (key == "FLAGS") {
+                    auto items = stdc::system::split_command_line(value);
+                    for (const auto &item : items) {
+                        // ignore C/C++ standard
+                        // if (is_msvc) {
+                        //     if (stdc::starts_with(item, "/std:") ||
+                        //         stdc::starts_with(item, "-std:")) {
+                        //         continue;
+                        //     }
+                        // } else {
+                        //     if (stdc::starts_with(item, "-std=")) {
+                        //         continue;
+                        //     }
+                        // }
+                        target.flags.push_back(item);
+                    }
+                    continue;
+                }
+
+                if (key == "LINK_FLAGS") {
+                    auto items = stdc::system::split_command_line(value);
+                    target.linkflags.insert(target.linkflags.end(), items.begin(), items.end());
+                    continue;
+                }
+            }
+        }
+    }
+
+    // print ninja targets
+    if (g_ctx.verbose) {
+        tool::debug("Auxiliary Targets:");
+        for (const auto &target : targets) {
+            stdc::u8println("TARGET %1:", target.first);
+            const auto &t = target.second;
+            if (!t.defines.empty()) {
+                stdc::u8println("  DEFINES:");
+                for (const auto &define : t.defines) {
+                    stdc::u8println("    %1", define);
+                }
+            }
+            if (!t.links.empty()) {
+                stdc::u8println("  LINKS:");
+                for (const auto &link : t.links) {
+                    stdc::u8println("    %1", link);
+                }
+            }
+            if (!t.linkdirs.empty()) {
+                stdc::u8println("  LINK_DIRS:");
+                for (const auto &linkdir : t.linkdirs) {
+                    stdc::u8println("    %1", linkdir);
+                }
+            }
+            if (!t.includes.empty()) {
+                stdc::u8println("  INCLUDE_DIRS:");
+                for (const auto &include : t.includes) {
+                    stdc::u8println("    %1", include);
+                }
+            }
+            if (!t.flags.empty()) {
+                stdc::u8println("  FLAGS:");
+                for (const auto &flag : t.flags) {
+                    stdc::u8println("    %1", flag);
+                }
+            }
+            if (!t.linkflags.empty()) {
+                stdc::u8println("  LINK_FLAGS:");
+                for (const auto &linkflag : t.linkflags) {
+                    stdc::u8println("    %1", linkflag);
+                }
+            }
+        }
+    }
+
     return 0;
 }
 
@@ -260,16 +554,17 @@ int main(int argc, char *argv[]) {
     rootCommand.addOption(SCL::Option::Verbose);
     rootCommand.addOption(SCL::Option({"--"}, "Extra CMake arguments")
                               .arg(SCL::Argument("args").nargs(SCL::Argument::Remainder)));
-    rootCommand.addHelpOption(true);
     rootCommand.addArguments({
         SCL::Argument("script", "Template CMake script"),
     });
     rootCommand.addVersionOption(TOOL_VERSION);
+    rootCommand.addHelpOption(true);
     rootCommand.setHandler(cmd_handler);
 
     SCL::Parser parser(rootCommand);
     parser.setPrologue(TOOL_DESC);
     parser.setEpilogue(TOOL_COPYRIGHT);
+    parser.setDisplayOptions(SCL::Parser::AlignAllCatalogues);
 
     int ret;
     try {
@@ -282,8 +577,7 @@ int main(int argc, char *argv[]) {
 #endif
     } catch (const std::exception &e) {
         std::string msg = exception_message(e);
-        stdc::console::printf(stdc::console::nostyle, stdc::console::lightred,
-                              stdc::console::nocolor, "Error: %s\n", msg.data());
+        tool::critical("Error: %1", msg);
         ret = -1;
     }
     return ret;
