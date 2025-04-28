@@ -10,7 +10,7 @@
 #include <stdcorelib/console.h>
 #include <stdcorelib/str.h>
 #include <stdcorelib/path.h>
-#include <stdcorelib/experimental/process.h>
+#include <stdcorelib/support/popen.h>
 
 #include <syscmdline/parser.h>
 #include <syscmdline/parseresult.h>
@@ -43,11 +43,18 @@ namespace tool {
     using stdc::console::warning;
     using stdc::console::critical;
 
-    using stdc::experimental::Process;
+    template <class... Args>
+    inline int info(const std::string_view &format, Args &&...args) {
+        return stdc::u8println(format, std::forward<Args>(args)...);
+    }
+
+    inline int println() {
+        return stdc::u8println();
+    }
 
     namespace ninja {
 
-        // don't use std::regex, which results in glibc stack overflow
+        // NOTICE: we don't use std::regex, which results in libstdc++ stack overflow
 
         // ^build\s+([^:]+):.+$
         static inline bool is_build_statement(std::string_view line, std::string_view &build_part) {
@@ -92,6 +99,56 @@ namespace tool {
 
     }
 
+    static int check_output(const std::filesystem::path &command,
+                            const std::vector<std::string> &args, const std::filesystem::path &cwd,
+                            const std::map<std::string, std::string> &env, std::string &output) {
+        std::vector<std::string> full_args;
+        full_args.reserve(args.size() + 1);
+        full_args.push_back(stdc::to_string(command));
+        full_args.insert(full_args.end(), args.begin(), args.end());
+
+        stdc::Popen p;
+        p.args(full_args)
+            .stdin_(stdc::Popen::DEVNULL)
+            .stdout_(stdc::Popen::PIPE)
+            .stderr_(stdc::Popen::DEVNULL)
+            .cwd(cwd)
+            .env(env);
+        if (!p.start()) {
+            throw std::runtime_error(
+                stdc::formatN("Check output error: %1", p.error_code().message()));
+        }
+        std::filebuf buf(p.stdout_());
+        std::istream is(&buf);
+        output = std::string(std::istreambuf_iterator<char>(is), {});
+        p.wait();
+        return p.returncode().value_or(-1);
+    }
+
+    static int execute_process(const std::filesystem::path &command,
+                               const std::vector<std::string> &args,
+                               const std::filesystem::path &cwd,
+                               const std::map<std::string, std::string> &env, bool redirect) {
+        std::vector<std::string> full_args;
+        full_args.reserve(args.size() + 1);
+        full_args.push_back(stdc::to_string(command));
+        full_args.insert(full_args.end(), args.begin(), args.end());
+
+        stdc::Popen p;
+        p.args(full_args)
+            .stdin_(stdc::Popen::DEVNULL)
+            .stdout_(redirect ? stdc::Popen::IODev(stdout) : stdc::Popen::DEVNULL)
+            .stderr_(redirect ? stdc::Popen::IODev(stderr) : stdc::Popen::DEVNULL)
+            .cwd(cwd)
+            .env(env);
+        if (!p.start()) {
+            throw std::runtime_error(
+                stdc::formatN("Execute process error: %1", p.error_code().message()));
+        }
+        p.wait();
+        return p.returncode().value_or(-1);
+    }
+
 }
 
 static GlobalContext g_ctx;
@@ -128,7 +185,7 @@ static void check_cmake() {
         if (g_ctx.verbose) {
             report_subprocess_args(g_ctx.cmakePath, cmakeArgs);
         }
-        ret = tool::Process::checkOptput(g_ctx.cmakePath, cmakeArgs, {}, output);
+        ret = tool::check_output(g_ctx.cmakePath, cmakeArgs, {}, {}, output);
     } catch (const std::exception &e) {
         throw std::runtime_error(stdc::formatN("check cmake failed: %1", exception_message(e)));
     }
@@ -149,7 +206,7 @@ static void check_cmake() {
         std::smatch match;
         if (std::regex_search(line, match, pattern)) {
             if (g_ctx.verbose) {
-                stdc::u8println("cmake version: %1", match[1].str());
+                tool::info("cmake version: %1", match[1].str());
             }
             return;
         }
@@ -169,7 +226,7 @@ static void check_ninja() {
         if (g_ctx.verbose) {
             report_subprocess_args(g_ctx.ninjaPath, ninjaArgs);
         }
-        ret = tool::Process::checkOptput(g_ctx.ninjaPath, ninjaArgs, {}, output);
+        ret = tool::check_output(g_ctx.ninjaPath, ninjaArgs, {}, {}, output);
     } catch (const std::exception &e) {
         throw std::runtime_error(stdc::formatN("check ninja failed: %1", exception_message(e)));
     }
@@ -185,7 +242,7 @@ static void check_ninja() {
     std::string line;
     if (std::getline(std::stringstream(output), line)) {
         if (g_ctx.verbose) {
-            stdc::u8println("ninja version: %1", line);
+            tool::info("ninja version: %1", line);
         }
         return;
     }
@@ -209,8 +266,7 @@ static void run_cmake_configure() {
         if (g_ctx.verbose) {
             report_subprocess_args(g_ctx.cmakePath, cmakeArgs);
         }
-        ret = tool::Process::start(g_ctx.cmakePath, cmakeArgs, g_ctx.dir, g_ctx.verbose ? "-" : "",
-                                   g_ctx.verbose ? "-" : "");
+        ret = tool::execute_process(g_ctx.cmakePath, cmakeArgs, g_ctx.dir, {}, g_ctx.verbose);
     } catch (const std::exception &e) {
         throw std::runtime_error(stdc::formatN("execute cmake failed: %1", exception_message(e)));
     }
@@ -362,9 +418,6 @@ static int cmd_handler(const SCL::ParseResult &result) {
         std::map<std::string, std::string> current_vars;
 
         while (std::getline(ninjaFile, line)) {
-            // NOTICE:
-            //
-
             std::string_view line_view = line;
 
             // https://ninja-build.org/manual.html#_build_statements
@@ -410,11 +463,11 @@ static int cmd_handler(const SCL::ParseResult &result) {
         if (g_ctx.verbose) {
             tool::debug("Parse build.ninja:");
             for (const auto &build : ninja_builds) {
-                stdc::u8println("build %1:", build.build_target);
+                tool::info("build %1:", build.build_target);
                 for (const auto &var : build.variables) {
-                    stdc::u8println("  %1 = %2", var.first, var.second);
+                    tool::info("  %1 = %2", var.first, var.second);
                 }
-                stdc::u8println();
+                tool::println();
             }
         }
 
@@ -545,42 +598,42 @@ static int cmd_handler(const SCL::ParseResult &result) {
     if (g_ctx.verbose) {
         tool::debug("Auxiliary Targets:");
         for (const auto &target : targets) {
-            stdc::u8println("TARGET %1:", target.first);
+            tool::info("TARGET %1:", target.first);
             const auto &t = target.second;
             if (!t.defines.empty()) {
-                stdc::u8println("  DEFINES:");
+                tool::info("  DEFINES:");
                 for (const auto &define : t.defines) {
-                    stdc::u8println("    %1", define);
+                    tool::info("    %1", define);
                 }
             }
             if (!t.links.empty()) {
-                stdc::u8println("  LINKS:");
+                tool::info("  LINKS:");
                 for (const auto &link : t.links) {
-                    stdc::u8println("    %1", link);
+                    tool::info("    %1", link);
                 }
             }
             if (!t.linkdirs.empty()) {
-                stdc::u8println("  LINK_DIRS:");
+                tool::info("  LINK_DIRS:");
                 for (const auto &linkdir : t.linkdirs) {
-                    stdc::u8println("    %1", linkdir);
+                    tool::info("    %1", linkdir);
                 }
             }
             if (!t.includes.empty()) {
-                stdc::u8println("  INCLUDE_DIRS:");
+                tool::info("  INCLUDE_DIRS:");
                 for (const auto &include : t.includes) {
-                    stdc::u8println("    %1", include);
+                    tool::info("    %1", include);
                 }
             }
             if (!t.flags.empty()) {
-                stdc::u8println("  FLAGS:");
+                tool::info("  FLAGS:");
                 for (const auto &flag : t.flags) {
-                    stdc::u8println("    %1", flag);
+                    tool::info("    %1", flag);
                 }
             }
             if (!t.linkflags.empty()) {
-                stdc::u8println("  LINK_FLAGS:");
+                tool::info("  LINK_FLAGS:");
                 for (const auto &linkflag : t.linkflags) {
-                    stdc::u8println("    %1", linkflag);
+                    tool::info("    %1", linkflag);
                 }
             }
         }
@@ -589,9 +642,62 @@ static int cmd_handler(const SCL::ParseResult &result) {
     return 0;
 }
 
+#include <stdcorelib/support/popen.h>
+
 int main(int argc, char *argv[]) {
     (void) argc;
     (void) argv;
+
+    // try {
+    //     stdc::Popen proc;
+    //     proc.args({
+    //              "git",
+    //             "clone",
+    //             "--recursive",
+    //             "https://github.com/stdware/qwindowkit.git",
+    //         })
+    //         .stdout_(stdout)
+    //         .stderr_(stdc::Popen::STDOUT);
+    //     proc.done();
+    //     int code = proc.wait();
+    //     tool::success("Process exit with code %1", code);
+    // } catch (const std::exception &e) {
+    //     std::string msg = exception_message(e);
+    //     tool::critical("Error: %1", msg);
+    //     return -1;
+    // }
+
+    // stdc::Popen proc;
+    // proc.args({"git", "--version"})
+    //     .text(true)
+    //     .stdout_(stdc::Popen::PIPE)
+    //     .stderr_(stdc::Popen::STDOUT);
+    // if (!proc.start()) {
+    //     stdc::u8println("Failed to start process: %1", proc.error_code().message());
+    //     return -1;
+    // }
+
+    // FILE *out = proc.stdout_();
+    // std::filebuf buf(out);
+    // std::istream is(&buf);
+    // std::string line;
+    // while (std::getline(is, line)) {
+    //     stdc::u8println(line);
+    // }
+    // stdc::u8println();
+    // proc.wait();
+
+    // int code = proc.returncode().value_or(-1);
+    // stdc::console::success("Process exit with code %1", code);
+    // return 0;
+
+    // stdc::cprintln("${yellow}yellow ${green}green ${blue}blue ${cyan}cyan ${magenta}magenta "
+    //                "${white}white ${lightred}lightred ${strikethrough}strikethrough "
+    //                "${underline}underline ${bold}bold ${italic}italic ${nostyle}nostyle $$");
+    // stdc::cprintln("${yellow bold}yellow/bold ${nostyle}yellow ${@red}yellow/@red "
+    //                "${nocolor}@red ${@nocolor}text $$");
+    // stdc::cprintf("%syellow %s $$ $$ $$$ $$$$ $$$$$ 123 $$ 456\n", "${yellow}", "$${yellow}");
+    // return 0;
 
     SCL::Command rootCommand(stdc::system::application_name(), "Dump CMake package specification.");
     rootCommand.addOptions({
@@ -605,7 +711,7 @@ int main(int argc, char *argv[]) {
     rootCommand.addOption(SCL::Option({"--"}, "Extra CMake arguments")
                               .arg(SCL::Argument("args").nargs(SCL::Argument::Remainder)));
     rootCommand.addArguments({
-        SCL::Argument("script", "Template CMake script"),
+        SCL::Argument("script", "CMake script which calls \"find_package()\""),
     });
     rootCommand.addVersionOption(TOOL_VERSION);
     rootCommand.addHelpOption(true);
